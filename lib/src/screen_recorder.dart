@@ -1,26 +1,26 @@
-import 'dart:ui' as ui show Image;
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
-import 'exporter.dart';
-import 'frame.dart';
+import 'package:screen_recorder/src/exporter.dart';
+import 'package:screen_recorder/src/constants.dart';
+import 'package:screen_recorder/src/render_type.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:ui' as ui show Image, ImageByteFormat;
 
 class ScreenRecorderController {
   ScreenRecorderController({
-    Exporter? exporter,
-    this.pixelRatio = 0.5,
-    this.skipFramesBetweenCaptures = 2,
+    this.pixelRatio = 3.0,
+    //  this.skipFramesBetweenCaptures = 2,
     SchedulerBinding? binding,
   })  : _containerKey = GlobalKey(),
-        _binding = binding ?? SchedulerBinding.instance,
-        _exporter = exporter ?? Exporter();
+        _binding = binding ?? SchedulerBinding.instance;
 
   final GlobalKey _containerKey;
   final SchedulerBinding _binding;
-  final Exporter _exporter;
-
-  Exporter get exporter => _exporter;
 
   /// The pixelRatio describes the scale between the logical pixels and the size
   /// of the output image. Specifying 1.0 will give you a 1:1 mapping between
@@ -35,9 +35,10 @@ class ScreenRecorderController {
   /// For example if it's `skipFramesBetweenCaptures = 2` screen_recorder
   /// captures a frame, skips the next two frames and then captures the next
   /// frame again.
-  final int skipFramesBetweenCaptures;
+  ////////////////// final int skipFramesBetweenCaptures;
 
-  int skipped = 0;
+  /// save frames
+  final List<ui.Image> _frames = [];
 
   bool _record = false;
 
@@ -58,48 +59,113 @@ class ScreenRecorderController {
     if (_record == false) {
       return;
     }
-    if (skipped > 0) {
-      // count down frames which should be skipped
-      skipped = skipped - 1;
-      // add a new PostFrameCallback to know about the next frame
-      _binding.addPostFrameCallback(postFrameCallback);
-      // but we do nothing, because we skip this frame
-      return;
-    }
-    if (skipped == 0) {
-      // reset skipped frame counter
-      skipped = skipped + skipFramesBetweenCaptures;
-    }
+
     try {
-      final image = capture();
+      final image = await capture();
       if (image == null) {
-        debugPrint('capture returned null');
+        print('capture returned null');
         return;
       }
-      _exporter.onNewFrame(Frame(timestamp, image));
+      _frames.add(image);
     } catch (e) {
-      debugPrint(e.toString());
+      print(e.toString());
     }
     _binding.addPostFrameCallback(postFrameCallback);
   }
 
-  ui.Image? capture() {
-    final renderObject = _containerKey.currentContext!.findRenderObject()
-        as RenderRepaintBoundary;
+  /// capture widget to render
+  Future<ui.Image?> capture() async {
+    final renderObject = _containerKey.currentContext?.findRenderObject();
 
-    return renderObject.toImageSync(pixelRatio: pixelRatio);
+    if (renderObject is RenderRepaintBoundary) {
+      final image = await renderObject.toImage(pixelRatio: 3.0);
+      return image;
+    } else {
+      FlutterError.reportError(_noRenderObject());
+    }
+    return null;
+  }
+
+  /// error details
+  FlutterErrorDetails _noRenderObject() {
+    return FlutterErrorDetails(
+      exception: Exception(
+        '_containerKey.currentContext is null. '
+        'Thus we can\'t create a screenshot',
+      ),
+      library: 'feedback',
+      context: ErrorDescription(
+        'Tried to find a context to use it to create a screenshot',
+      ),
+    );
+  }
+
+  /// export widget
+  Future<Map<String, dynamic>> export({required RenderType renderType}) async {
+    int timestamp = DateTime.now().millisecondsSinceEpoch.toInt();
+
+    String dir;
+    String imagePath;
+    List<File> imageFiles = [];
+    List<List<int>> imageFilesBytes = [];
+    List<Size> imageFilesSize = [];
+
+    /// get application temp directory
+    Directory appDocDirectory = await getTemporaryDirectory();
+    dir = appDocDirectory.path;
+
+    basePath = "$dir/";
+
+    /// delete last directory
+    if (appDocDirectory.existsSync()) {
+      try {
+        appDocDirectory.deleteSync(recursive: true);
+      } catch (e) {}
+    }
+
+    /// create new directory
+    appDocDirectory.create();
+
+    /// iterate all frames
+    for (int i = 0; i < _frames.length; i++) {
+      /// convert frame to byte data png
+      final val = await _frames[i].toByteData(format: ui.ImageByteFormat.png);
+
+      /// convert frame to buffer list
+      Uint8List pngBytes = val!.buffer.asUint8List();
+
+      /// create temp path for every frame
+      imagePath = '$dir/$i.png';
+
+      /// create image frame in the temp directory
+      File capturedFile = File(imagePath);
+      await capturedFile.writeAsBytes(pngBytes);
+    }
+
+    /// clear frame list
+    _frames.clear();
+
+    /// render frames.png to video/gif
+    var response = await Exporter().mergeIntoVideo(
+      renderType: renderType,
+    );
+
+    /// return
+    return response;
   }
 }
 
 class ScreenRecorder extends StatelessWidget {
-  const ScreenRecorder({
-    super.key,
+  ScreenRecorder({
+    Key? key,
     required this.child,
     required this.controller,
     required this.width,
     required this.height,
-    this.background = Colors.transparent,
-  });
+    this.background = Colors.white,
+  })  : assert(background.alpha == 255,
+            'background color is not allowed to be transparent'),
+        super(key: key);
 
   /// The child which should be recorded.
   final Widget child;
@@ -128,7 +194,7 @@ class ScreenRecorder extends StatelessWidget {
       child: Container(
         width: width,
         height: height,
-        color: background,
+        color: Colors.black, //background
         alignment: Alignment.center,
         child: child,
       ),
